@@ -11,7 +11,7 @@ from modules.core.controller import KettleController
 from modules.core.props import Property
 
 @cbpi.controller
-class PIDAutoTune(KettleController):
+class PIDAutoTunePowerOutput(KettleController):
 
 	a_outstep = Property.Number("output step %", True, 100, description="Default: 100. Sets the output when stepping up/down.")
 	b_maxout = Property.Number("max. output %", True, 100, description="Default: 100. Sets the max power output.")
@@ -25,12 +25,12 @@ class PIDAutoTune(KettleController):
 	def stop(self):
 		if self.is_running():
 			self.notify("AutoTune Interrupted", "AutoTune has been interrupted and was not able to finish", type="danger", timeout=None)
-		
+
 		super(KettleController, self).stop()
 
 	def run(self):
 		self.notify("AutoTune In Progress", "Do not turn off Auto mode until AutoTuning is complete", type="success", timeout=None)
-	
+
 		sampleTime = 5
 		wait_time = 5
 		outstep = float(self.a_outstep)
@@ -38,29 +38,36 @@ class PIDAutoTune(KettleController):
 		lookbackSec = float(self.c_lookback)
 		setpoint = self.get_target_temp()
 		try:
-			atune = AutoTuner(setpoint, outstep, sampleTime, lookbackSec, 0, outmax)
+			atune = AutoTunerPower(setpoint, outstep, sampleTime, lookbackSec, 0, outmax)
 		except Exception as e:
 			self.notify("AutoTune Error", str(e), type="danger", timeout=None)
 			atune.log(str(e))
-			self.autoOff() 
+			self.autoOff()
 		atune.log("AutoTune will now begin")
-
+		atune.log('heater on')
+		self.heater_on()
+		self.sleep(2)
 		while self.is_running() and not atune.run(self.get_temp()):
-			heat_percent = atune.output
-			heating_time = sampleTime * heat_percent / 100
-			wait_time = sampleTime - heating_time
-			if heating_time == sampleTime:
-				self.heater_on()
-				self.sleep(heating_time)
-			elif wait_time == sampleTime:
-				self.heater_off()
-				self.sleep(wait_time)
-			else:
-				self.heater_on()
-				self.sleep(heating_time)
-				self.heater_off()
-				self.sleep(wait_time)
+			heat_percent = int(atune.output)
+			atune.log('PID setting Power to {}'.format(heat_percent))
+			self.actor_power(heat_percent)
+			self.sleep(5)
+			# heating_time = sampleTime * heat_percent / 100
+			# wait_time = sampleTime - heating_time
+			# if heating_time == sampleTime:
+				# self.heater_on()
+				# self.sleep(heating_time)
+			# elif wait_time == sampleTime:
+				# self.heater_off()
+				# self.sleep(wait_time)
+			# else:
+				# self.heater_on()
+				# self.sleep(heating_time)
+				# self.heater_off()
+				# self.sleep(wait_time)
 
+		atune.log('heater off')
+		self.heater_off()
 		self.autoOff()
 
 		if atune.state == atune.STATE_SUCCEEDED:
@@ -82,7 +89,7 @@ class PIDAutoTune(KettleController):
 
 # Based on a fork of Arduino PID AutoTune Library
 # See https://github.com/t0mpr1c3/Arduino-PID-AutoTune-Library
-class AutoTuner(object):
+class AutoTunerPower(object):
 	PIDParams = namedtuple('PIDParams', ['Kp', 'Ki', 'Kd'])
 
 	PEAK_AMPLITUDE_TOLERANCE = 0.05
@@ -124,7 +131,7 @@ class AutoTuner(object):
 		self._outputMin = outputMin
 		self._outputMax = outputMax
 
-		self._state = AutoTuner.STATE_OFF
+		self._state = AutoTunerPower.STATE_OFF
 		self._peakTimestamps = deque(maxlen=5)
 		self._peaks = deque(maxlen=5)
 
@@ -132,7 +139,7 @@ class AutoTuner(object):
 		self._lastRunTimestamp = 0
 		self._peakType = 0
 		self._peakCount = 0
-		self._initialOutput = 0
+		self._initialOutput = 100
 		self._inducedAmplitude = 0
 		self._Ku = 0
 		self._Pu = 0
@@ -159,7 +166,7 @@ class AutoTuner(object):
 		kp = self._Ku / divisors[0]
 		ki = kp / (self._Pu / divisors[1])
 		kd = kp * (self._Pu / divisors[2])
-		return AutoTuner.PIDParams(kp, ki, kd)
+		return AutoTunerPower.PIDParams(kp, ki, kd)
 
 	def log(self, text):
 		filename = "./logs/autotune.log"
@@ -167,13 +174,13 @@ class AutoTuner(object):
 
 		with open(filename, "a") as file:
 			file.write("%s,%s\n" % (formatted_time, text))
-		
+
 	def run(self, inputValue):
 		now = self._getTimeMs()
 
-		if (self._state == AutoTuner.STATE_OFF
-				or self._state == AutoTuner.STATE_SUCCEEDED
-				or self._state == AutoTuner.STATE_FAILED):
+		if (self._state == AutoTunerPower.STATE_OFF
+				or self._state == AutoTunerPower.STATE_SUCCEEDED
+				or self._state == AutoTunerPower.STATE_FAILED):
 			self._initTuner(inputValue, now)
 		elif (now - self._lastRunTimestamp) < self._sampleTime:
 			return False
@@ -181,22 +188,22 @@ class AutoTuner(object):
 		self._lastRunTimestamp = now
 
 		# check input and change relay state if necessary
-		if (self._state == AutoTuner.STATE_RELAY_STEP_UP
+		if (self._state == AutoTunerPower.STATE_RELAY_STEP_UP
 				and inputValue > self._setpoint + self._noiseband):
-			self._state = AutoTuner.STATE_RELAY_STEP_DOWN
+			self._state = AutoTunerPower.STATE_RELAY_STEP_DOWN
 			self.log('switched state: {0}'.format(self._state))
 			self.log('input: {0}'.format(inputValue))
-		elif (self._state == AutoTuner.STATE_RELAY_STEP_DOWN
+		elif (self._state == AutoTunerPower.STATE_RELAY_STEP_DOWN
 				and inputValue < self._setpoint - self._noiseband):
-			self._state = AutoTuner.STATE_RELAY_STEP_UP
+			self._state = AutoTunerPower.STATE_RELAY_STEP_UP
 			self.log('switched state: {0}'.format(self._state))
 			self.log('input: {0}'.format(inputValue))
 
 		# set output
-		if (self._state == AutoTuner.STATE_RELAY_STEP_UP):
-			self._output = self._initialOutput + self._outputstep
-		elif self._state == AutoTuner.STATE_RELAY_STEP_DOWN:
-			self._output = self._initialOutput - self._outputstep
+		if (self._state == AutoTunerPower.STATE_RELAY_STEP_UP):
+			self._output = self._output + self._outputstep
+		elif self._state == AutoTunerPower.STATE_RELAY_STEP_DOWN:
+			self._output = self._output - self._outputstep
 
 		# respect output limits
 		self._output = min(self._output, self._outputMax)
@@ -260,17 +267,17 @@ class AutoTuner(object):
 			self.log('amplitude: {0}'.format(self._inducedAmplitude))
 			self.log('amplitude deviation: {0}'.format(amplitudeDev))
 
-			if amplitudeDev < AutoTuner.PEAK_AMPLITUDE_TOLERANCE:
-				self._state = AutoTuner.STATE_SUCCEEDED
+			if amplitudeDev < AutoTunerPower.PEAK_AMPLITUDE_TOLERANCE:
+				self._state = AutoTunerPower.STATE_SUCCEEDED
 
 		# if the autotune has not already converged
 		# terminate after 10 cycles
 		if self._peakCount >= 20:
 			self._output = 0
-			self._state = AutoTuner.STATE_FAILED
+			self._state = AutoTunerPower.STATE_FAILED
 			return True
 
-		if self._state == AutoTuner.STATE_SUCCEEDED:
+		if self._state == AutoTunerPower.STATE_SUCCEEDED:
 			self._output = 0
 
 			# calculate ultimate gain
@@ -291,11 +298,11 @@ class AutoTuner(object):
 		self._peakType = 0
 		self._peakCount = 0
 		self._output = 0
-		self._initialOutput = 0
+		self._initialOutput = 100
 		self._Ku = 0
 		self._Pu = 0
 		self._inputs.clear()
 		self._peaks.clear()
 		self._peakTimestamps.clear()
 		self._peakTimestamps.append(timestamp)
-		self._state = AutoTuner.STATE_RELAY_STEP_UP
+		self._state = AutoTunerPower.STATE_RELAY_STEP_UP
